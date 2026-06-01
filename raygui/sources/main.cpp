@@ -1,301 +1,506 @@
 #include "raylib.h"
 
-#define RAYGUI_IMPLEMENTATION
-#include "raygui.h"
+#include <vector>
+#include <string>
+#include <fstream>
+#include <algorithm>
+#include <sstream>
+#include <cmath>
 
-/*******************************************************************************************
-*
-*   raygui - controls test suite
-*
-*   TEST CONTROLS:
-*       - GuiDropdownBox()
-*       - GuiCheckBox()
-*       - GuiSpinner()
-*       - GuiValueBox()
-*       - GuiTextBox()
-*       - GuiButton()
-*       - GuiComboBox()
-*       - GuiListView()
-*       - GuiToggleGroup()
-*       - GuiColorPicker()
-*       - GuiSlider()
-*       - GuiSliderBar()
-*       - GuiProgressBar()
-*       - GuiColorBarAlpha()
-*       - GuiScrollPanel()
-*
-*
-*   DEPENDENCIES:
-*       raylib 4.5          - Windowing/input management and drawing
-*       raygui 3.5          - Immediate-mode GUI controls with custom styling and icons
-*
-*   COMPILATION (Windows - MinGW):
-*       gcc -o $(NAME_PART).exe $(FILE_NAME) -I../../src -lraylib -lopengl32 -lgdi32 -std=c99
-*
-*   LICENSE: zlib/libpng
-*
-*   Copyright (c) 2016-2024 Ramon Santamaria (@raysan5)
-*
-**********************************************************************************************/
+const int FONT_SIZE     = 20;
+const int LINE_HEIGHT   = 24;
+const int TEXT_ORIGIN_X = 70;
+const int TEXT_ORIGIN_Y = 50;
 
-//------------------------------------------------------------------------------------
-// Program main entry point
-//------------------------------------------------------------------------------------
+std::vector<std::string> lines(1, "");
+
+int cursorLine = 0;
+int cursorCol  = 0;
+
+// ---------------------------------------------------------------------------
+// Selection
+// ---------------------------------------------------------------------------
+bool selActive    = false;
+int  selStartLine = 0;
+int  selStartCol  = 0;
+int  selEndLine   = 0;
+int  selEndCol    = 0;
+
+void GetSelectionOrdered(int& sl, int& sc, int& el, int& ec)
+{
+    if (selStartLine < selEndLine ||
+        (selStartLine == selEndLine && selStartCol <= selEndCol))
+    {
+        sl = selStartLine; sc = selStartCol;
+        el = selEndLine;   ec = selEndCol;
+    }
+    else
+    {
+        sl = selEndLine;   sc = selEndCol;
+        el = selStartLine; ec = selStartCol;
+    }
+}
+
+std::string GetSelectedText()
+{
+    if (!selActive) return "";
+    int sl, sc, el, ec;
+    GetSelectionOrdered(sl, sc, el, ec);
+    std::string result;
+    if (sl == el)
+    {
+        result = lines[sl].substr(sc, ec - sc);
+    }
+    else
+    {
+        result = lines[sl].substr(sc);
+        for (int i = sl + 1; i < el; i++) result += '\n' + lines[i];
+        result += '\n' + lines[el].substr(0, ec);
+    }
+    return result;
+}
+
+void DeleteSelection()
+{
+    if (!selActive) return;
+    int sl, sc, el, ec;
+    GetSelectionOrdered(sl, sc, el, ec);
+    if (sl == el)
+    {
+        lines[sl].erase(sc, ec - sc);
+    }
+    else
+    {
+        std::string merged = lines[sl].substr(0, sc) + lines[el].substr(ec);
+        lines.erase(lines.begin() + sl, lines.begin() + el + 1);
+        lines.insert(lines.begin() + sl, merged);
+    }
+    cursorLine = sl;
+    cursorCol  = sc;
+    selActive  = false;
+}
+
+// Anchor = the fixed end; cursor is the moving end.
+// Call this every time the cursor moves with Shift held.
+void UpdateSelectionTocursor()
+{
+    selEndLine = cursorLine;
+    selEndCol  = cursorCol;
+    selActive  = (selEndLine != selStartLine || selEndCol != selStartCol);
+}
+
+// Start a brand-new Shift-selection from the current cursor position.
+void BeginShiftSelection()
+{
+    selStartLine = cursorLine;
+    selStartCol  = cursorCol;
+}
+
+// ---------------------------------------------------------------------------
+// Hit-test
+// ---------------------------------------------------------------------------
+void PixelToLineCol(int px, int py, int& outLine, int& outCol)
+{
+    outLine = (py - TEXT_ORIGIN_Y) / LINE_HEIGHT;
+    outLine = std::max(0, std::min(outLine, (int)lines.size() - 1));
+    int relX = px - TEXT_ORIGIN_X;
+    const std::string& ln = lines[outLine];
+    outCol = (int)ln.size();
+    for (int c = 0; c < (int)ln.size(); c++)
+    {
+        int w = MeasureText(ln.substr(0, c + 1).c_str(), FONT_SIZE);
+        if (relX < w)
+        {
+            int wPrev = MeasureText(ln.substr(0, c).c_str(), FONT_SIZE);
+            outCol = (relX - wPrev < w - relX) ? c : c + 1;
+            break;
+        }
+    }
+    outCol = std::max(0, std::min(outCol, (int)ln.size()));
+}
+
+// ---------------------------------------------------------------------------
+// Accelerating backspace
+// ---------------------------------------------------------------------------
+float backspaceHeldTime    = 0.0f;
+float backspaceRepeatTimer = 0.0f;
+const float BACKSPACE_INITIAL_DELAY = 0.4f;
+const float BACKSPACE_REPEAT_SLOW   = 0.08f;
+const float BACKSPACE_REPEAT_FAST   = 0.016f;
+const float BACKSPACE_RAMP_DURATION = 2.0f;
+
+void DoBackspace()
+{
+    if (selActive) { DeleteSelection(); return; }
+    if (cursorCol > 0)
+    {
+        lines[cursorLine].erase(cursorCol - 1, 1);
+        cursorCol--;
+    }
+    else if (cursorLine > 0)
+    {
+        int prevLen = (int)lines[cursorLine - 1].size();
+        lines[cursorLine - 1] += lines[cursorLine];
+        lines.erase(lines.begin() + cursorLine);
+        cursorLine--;
+        cursorCol = prevLen;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard
+// ---------------------------------------------------------------------------
+void DoCopy()  { if (selActive) SetClipboardText(GetSelectedText().c_str()); }
+void DoCut()   { DoCopy(); DeleteSelection(); }
+void DoPaste()
+{
+    if (selActive) DeleteSelection();
+    const char* cb = GetClipboardText();
+    if (!cb) return;
+    std::string cbStr(cb);
+    std::istringstream ss{cbStr};
+    std::string seg;
+    bool first = true;
+    while (std::getline(ss, seg))
+    {
+        if (!first)
+        {
+            std::string rem = lines[cursorLine].substr(cursorCol);
+            lines[cursorLine] = lines[cursorLine].substr(0, cursorCol);
+            lines.insert(lines.begin() + cursorLine + 1, rem);
+            cursorLine++; cursorCol = 0;
+        }
+        lines[cursorLine].insert(cursorCol, seg);
+        cursorCol += (int)seg.size();
+        first = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File I/O
+// ---------------------------------------------------------------------------
+int GetTotalCharCount()
+{
+    int t = 0;
+    for (const auto& l : lines) t += (int)l.size();
+    return t;
+}
+void SaveFile(const char* fn)
+{
+    std::ofstream f(fn);
+    for (size_t i = 0; i < lines.size(); i++) { f << lines[i]; if (i+1 < lines.size()) f << '\n'; }
+}
+void LoadFile(const char* fn)
+{
+    std::ifstream f(fn); if (!f.is_open()) return;
+    lines.clear();
+    std::string l;
+    while (std::getline(f, l)) lines.push_back(l);
+    if (lines.empty()) lines.push_back("");
+    cursorLine = 0; cursorCol = 0; selActive = false;
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
 int main()
 {
-    // Initialization
-    //---------------------------------------------------------------------------------------
-    const int screenWidth = 960;
-    const int screenHeight = 560;
-
-    InitWindow(screenWidth, screenHeight, "raygui - controls test suite");
-    SetExitKey(0);
-
-    // GUI controls initialization
-    //----------------------------------------------------------------------------------
-    int dropdownBox000Active = 0;
-    bool dropDown000EditMode = false;
-
-    int dropdownBox001Active = 0;
-    bool dropDown001EditMode = false;
-
-    int spinner001Value = 0;
-    bool spinnerEditMode = false;
-
-    int valueBox002Value = 0;
-    bool valueBoxEditMode = false;
-
-    char textBoxText[64] = "Text box";
-    bool textBoxEditMode = false;
-
-    char textBoxMultiText[1024] = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.\n\nDuis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.\n\nThisisastringlongerthanexpectedwithoutspacestotestcharbreaksforthosecases,checkingifworkingasexpected.\n\nExcepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.";
-    bool textBoxMultiEditMode = false;
-
-    int listViewScrollIndex = 0;
-    int listViewActive = -1;
-
-    int listViewExScrollIndex = 0;
-    int listViewExActive = 2;
-    int listViewExFocus = -1;
-    char *listViewExList[8] = { "This", "is", "a", "list view", "with", "disable", "elements", "amazing!" };
-
-    Color colorPickerValue = RED;
-
-    float sliderValue = 50.0f;
-    float sliderBarValue = 60;
-    float progressValue = 0.1f;
-
-    bool forceSquaredChecked = false;
-
-    float alphaValue = 0.5f;
-
-    //int comboBoxActive = 1;
-    int visualStyleActive = 0;
-    int prevVisualStyleActive = 0;
-
-    int toggleGroupActive = 0;
-    int toggleSliderActive = 0;
-
-    Vector2 viewScroll = { 0, 0 };
-    //----------------------------------------------------------------------------------
-
-    // Custom GUI font loading
-    //Font font = LoadFontEx("fonts/rainyhearts16.ttf", 12, 0, 0);
-    //GuiSetFont(font);
-
-    bool exitWindow = false;
-    bool showMessageBox = false;
-
-    char textInput[256] = { 0 };
-    char textInputFileName[256] = { 0 };
-    bool showTextInputBox = false;
-
-    float alpha = 1.0f;
-
-    // DEBUG: Testing how those two properties affect all controls!
-    //GuiSetStyle(DEFAULT, TEXT_PADDING, 0);
-    //GuiSetStyle(DEFAULT, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
-
+    InitWindow(1200, 800, "Raylib Text Editor");
     SetTargetFPS(60);
-    //--------------------------------------------------------------------------------------
 
-    // Main game loop
-    while (!exitWindow)    // Detect window close button or ESC key
+    const char* currentFile = "document.txt";
+    bool mouseWasDragging  = false;
+    // Track whether the previous Shift+Arrow frame had Shift down,
+    // so we know when to anchor a new selection.
+    bool shiftWasDown = false;
+
+    while (!WindowShouldClose())
     {
-        // Update
-        //----------------------------------------------------------------------------------
-        exitWindow = WindowShouldClose();
+        float dt = GetFrameTime();
 
-        if (IsKeyPressed(KEY_ESCAPE)) showMessageBox = !showMessageBox;
+        // ----------------------------------------------------------------
+        // Mouse
+        // ----------------------------------------------------------------
+        Vector2 mouse = GetMousePosition();
 
-        if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_S)) showTextInputBox = true;
-
-        if (IsFileDropped())
+        if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
         {
-            FilePathList droppedFiles = LoadDroppedFiles();
+            int cl, cc;
+            PixelToLineCol((int)mouse.x, (int)mouse.y, cl, cc);
 
-            if ((droppedFiles.count > 0) && IsFileExtension(droppedFiles.paths[0], ".rgs")) GuiLoadStyle(droppedFiles.paths[0]);
-
-            UnloadDroppedFiles(droppedFiles);    // Clear internal buffers
+            if (IsKeyDown(KEY_LEFT_SHIFT) && selActive)
+            {
+                // Shift+click: extend existing selection
+                selEndLine = cl; selEndCol = cc;
+                selActive  = (selEndLine != selStartLine || selEndCol != selStartCol);
+            }
+            else
+            {
+                // Plain click: move cursor, new anchor
+                selStartLine = cl; selStartCol = cc;
+                selEndLine   = cl; selEndCol   = cc;
+                selActive    = false;
+            }
+            cursorLine = cl; cursorCol = cc;
+            mouseWasDragging = false;
         }
 
-        //alpha -= 0.002f;
-        if (alpha < 0.0f) alpha = 0.0f;
-        if (IsKeyPressed(KEY_SPACE)) alpha = 1.0f;
-
-        GuiSetAlpha(alpha);
-
-        //progressValue += 0.002f;
-        if (IsKeyPressed(KEY_LEFT)) progressValue -= 0.1f;
-        else if (IsKeyPressed(KEY_RIGHT)) progressValue += 0.1f;
-        if (progressValue > 1.0f) progressValue = 1.0f;
-        else if (progressValue < 0.0f) progressValue = 0.0f;
-
-        if (visualStyleActive != prevVisualStyleActive)
+        if (IsMouseButtonDown(MOUSE_LEFT_BUTTON))
         {
-            GuiLoadStyleDefault();
-
-
-            GuiSetStyle(LABEL, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
-
-            prevVisualStyleActive = visualStyleActive;
+            int dl, dc;
+            PixelToLineCol((int)mouse.x, (int)mouse.y, dl, dc);
+            if (dl != selStartLine || dc != selStartCol)
+            {
+                selEndLine = dl; selEndCol = dc;
+                selActive  = (selEndLine != selStartLine || selEndCol != selStartCol);
+                cursorLine = dl; cursorCol = dc;
+                mouseWasDragging = true;
+            }
         }
-        //----------------------------------------------------------------------------------
 
+        if (IsMouseButtonReleased(MOUSE_LEFT_BUTTON))
+            if (!mouseWasDragging) selActive = false;
+
+        // ----------------------------------------------------------------
+        // Ctrl shortcuts
+        // ----------------------------------------------------------------
+        if (IsKeyDown(KEY_LEFT_CONTROL))
+        {
+            if (IsKeyPressed(KEY_S)) SaveFile(currentFile);
+            if (IsKeyPressed(KEY_O)) LoadFile(currentFile);
+            if (IsKeyPressed(KEY_C)) DoCopy();
+            if (IsKeyPressed(KEY_X)) DoCut();
+            if (IsKeyPressed(KEY_V)) DoPaste();
+            if (IsKeyPressed(KEY_A))
+            {
+                selStartLine = 0; selStartCol = 0;
+                selEndLine = (int)lines.size()-1; selEndCol = (int)lines.back().size();
+                selActive = true;
+                cursorLine = selEndLine; cursorCol = selEndCol;
+            }
+        }
+        else
+        {
+            // ----------------------------------------------------------------
+            // Shift+Arrow: extend / start selection
+            // ----------------------------------------------------------------
+            bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+
+            // If Shift was just pressed (not held last frame), anchor NOW at
+            // the current cursor position — before any movement happens.
+            if (shiftDown && !shiftWasDown)
+                BeginShiftSelection();
+
+            bool movedLeft  = IsKeyPressed(KEY_LEFT);
+            bool movedRight = IsKeyPressed(KEY_RIGHT);
+            bool movedUp    = IsKeyPressed(KEY_UP);
+            bool movedDown  = IsKeyPressed(KEY_DOWN);
+            bool anyArrow   = movedLeft || movedRight || movedUp || movedDown;
+
+            if (anyArrow)
+            {
+                if (shiftDown)
+                {
+                    // Move cursor
+                    if (movedLeft)
+                    {
+                        if (cursorCol > 0) cursorCol--;
+                        else if (cursorLine > 0) { cursorLine--; cursorCol = (int)lines[cursorLine].size(); }
+                    }
+                    if (movedRight)
+                    {
+                        if (cursorCol < (int)lines[cursorLine].size()) cursorCol++;
+                        else if (cursorLine+1 < (int)lines.size()) { cursorLine++; cursorCol = 0; }
+                    }
+                    if (movedUp && cursorLine > 0)
+                    {
+                        cursorLine--;
+                        cursorCol = std::min(cursorCol, (int)lines[cursorLine].size());
+                    }
+                    if (movedDown && cursorLine+1 < (int)lines.size())
+                    {
+                        cursorLine++;
+                        cursorCol = std::min(cursorCol, (int)lines[cursorLine].size());
+                    }
+
+                    UpdateSelectionTocursor();
+                }
+                else
+                {
+                    // Plain arrow: collapse selection
+                    if (selActive)
+                    {
+                        // Jump to appropriate end of selection
+                        int sl, sc, el, ec;
+                        GetSelectionOrdered(sl, sc, el, ec);
+                        if (movedLeft)  { cursorLine = sl; cursorCol = sc; }
+                        if (movedRight) { cursorLine = el; cursorCol = ec; }
+                        // Up/Down just move normally after clearing
+                        if (movedUp)
+                        {
+                            if (cursorLine > 0) { cursorLine--; cursorCol = std::min(cursorCol, (int)lines[cursorLine].size()); }
+                        }
+                        if (movedDown)
+                        {
+                            if (cursorLine+1 < (int)lines.size()) { cursorLine++; cursorCol = std::min(cursorCol, (int)lines[cursorLine].size()); }
+                        }
+                    }
+                    else
+                    {
+                        if (movedLeft)
+                        {
+                            if (cursorCol > 0) cursorCol--;
+                            else if (cursorLine > 0) { cursorLine--; cursorCol = (int)lines[cursorLine].size(); }
+                        }
+                        if (movedRight)
+                        {
+                            if (cursorCol < (int)lines[cursorLine].size()) cursorCol++;
+                            else if (cursorLine+1 < (int)lines.size()) { cursorLine++; cursorCol = 0; }
+                        }
+                        if (movedUp && cursorLine > 0)
+                        {
+                            cursorLine--;
+                            cursorCol = std::min(cursorCol, (int)lines[cursorLine].size());
+                        }
+                        if (movedDown && cursorLine+1 < (int)lines.size())
+                        {
+                            cursorLine++;
+                            cursorCol = std::min(cursorCol, (int)lines[cursorLine].size());
+                        }
+                    }
+                    selActive = false;
+                }
+            }
+
+            shiftWasDown = shiftDown;
+
+            // ----------------------------------------------------------------
+            // Text input
+            // ----------------------------------------------------------------
+            int key = GetCharPressed();
+            while (key > 0)
+            {
+                if (key >= 32 && key <= 126)
+                {
+                    if (selActive) DeleteSelection();
+                    lines[cursorLine].insert(cursorCol, 1, (char)key);
+                    cursorCol++;
+                }
+                key = GetCharPressed();
+            }
+
+            // Enter
+            if (IsKeyPressed(KEY_ENTER))
+            {
+                if (selActive) DeleteSelection();
+                std::string rem = lines[cursorLine].substr(cursorCol);
+                lines[cursorLine] = lines[cursorLine].substr(0, cursorCol);
+                lines.insert(lines.begin() + cursorLine + 1, rem);
+                cursorLine++; cursorCol = 0;
+            }
+
+            // Backspace (accelerating)
+            if (IsKeyDown(KEY_BACKSPACE))
+            {
+                if (IsKeyPressed(KEY_BACKSPACE))
+                {
+                    DoBackspace();
+                    backspaceHeldTime = backspaceRepeatTimer = 0.0f;
+                }
+                else
+                {
+                    backspaceHeldTime += dt;
+                    if (backspaceHeldTime >= BACKSPACE_INITIAL_DELAY)
+                    {
+                        float rampT = std::min(1.0f, (backspaceHeldTime - BACKSPACE_INITIAL_DELAY) / BACKSPACE_RAMP_DURATION);
+                        float interval = BACKSPACE_REPEAT_SLOW + (BACKSPACE_REPEAT_FAST - BACKSPACE_REPEAT_SLOW) * rampT;
+                        backspaceRepeatTimer += dt;
+                        while (backspaceRepeatTimer >= interval) { DoBackspace(); backspaceRepeatTimer -= interval; }
+                    }
+                }
+            }
+            else { backspaceHeldTime = backspaceRepeatTimer = 0.0f; }
+        }
+
+        // ----------------------------------------------------------------
         // Draw
-        //----------------------------------------------------------------------------------
+        // ----------------------------------------------------------------
         BeginDrawing();
+        ClearBackground(WHITE);
 
-            ClearBackground(GetColor(GuiGetStyle(DEFAULT, BACKGROUND_COLOR)));
+        // Current-line highlight (subtle amber strip)
+        if (!selActive)
+        {
+            DrawRectangle(
+                    0,
+                    TEXT_ORIGIN_Y + cursorLine * LINE_HEIGHT,
+                    GetScreenWidth(),
+                    LINE_HEIGHT,
+                    (Color){255, 240, 180, 80}
+            );
+        }
 
-            // raygui: controls drawing
-            //----------------------------------------------------------------------------------
-            // Check all possible events that require GuiLock
-            if (dropDown000EditMode || dropDown001EditMode) GuiLock();
-            if (showTextInputBox) GuiLock();
-
-            // First GUI column
-            //GuiSetStyle(CHECKBOX, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
-            GuiCheckBox((Rectangle){ 25, 108, 15, 15 }, "FORCE CHECK!", &forceSquaredChecked);
-
-            GuiSetStyle(TEXTBOX, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
-            //GuiSetStyle(VALUEBOX, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
-            if (GuiSpinner((Rectangle){ 25, 135, 125, 30 }, NULL, &spinner001Value, 0, 100, spinnerEditMode)) spinnerEditMode = !spinnerEditMode;
-            if (GuiValueBox((Rectangle){ 25, 175, 125, 30 }, NULL, &valueBox002Value, 0, 100, valueBoxEditMode)) valueBoxEditMode = !valueBoxEditMode;
-            GuiSetStyle(TEXTBOX, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
-            if (GuiTextBox((Rectangle){ 25, 215, 125, 30 }, textBoxText, 64, textBoxEditMode)) textBoxEditMode = !textBoxEditMode;
-
-            GuiSetStyle(BUTTON, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
-
-            if (GuiButton((Rectangle){ 25, 255, 125, 30 }, GuiIconText(ICON_FILE_SAVE, "Save File"))) showTextInputBox = true;
-
-            GuiGroupBox((Rectangle){ 25, 310, 125, 150 }, "STATES");
-            //GuiLock();
-            GuiSetState(STATE_NORMAL); if (GuiButton((Rectangle){ 30, 320, 115, 30 }, "NORMAL")) { }
-            GuiSetState(STATE_FOCUSED); if (GuiButton((Rectangle){ 30, 355, 115, 30 }, "FOCUSED")) { }
-            GuiSetState(STATE_PRESSED); if (GuiButton((Rectangle){ 30, 390, 115, 30 }, "#15#PRESSED")) { }
-            GuiSetState(STATE_DISABLED); if (GuiButton((Rectangle){ 30, 425, 115, 30 }, "DISABLED")) { }
-            GuiSetState(STATE_NORMAL);
-            //GuiUnlock();
-
-            GuiComboBox((Rectangle){ 25, 480, 125, 30 },
-                "default;Jungle;Lavanda;Dark;Bluish;Cyber;Terminal;Candy;Cherry;Ashes;Enefete;Sunny;Amber;Genesis", &visualStyleActive);
-
-            // NOTE: GuiDropdownBox must draw after any other control that can be covered on unfolding
-            if (dropDown000EditMode || dropDown001EditMode) GuiUnlock();
-            if (showTextInputBox) GuiLock();    // Stay locked
-
-            GuiSetStyle(DROPDOWNBOX, TEXT_PADDING, 4);
-            GuiSetStyle(DROPDOWNBOX, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
-            if (GuiDropdownBox((Rectangle){ 25, 65, 125, 30 }, "#01#ONE;#02#TWO;#03#THREE;#04#FOUR", &dropdownBox001Active, dropDown001EditMode)) dropDown001EditMode = !dropDown001EditMode;
-            GuiSetStyle(DROPDOWNBOX, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
-            GuiSetStyle(DROPDOWNBOX, TEXT_PADDING, 0);
-
-            if (GuiDropdownBox((Rectangle){ 25, 25, 125, 30 }, "ONE;TWO;THREE", &dropdownBox000Active, dropDown000EditMode)) dropDown000EditMode = !dropDown000EditMode;
-
-            // Second GUI column
-            //GuiSetStyle(LISTVIEW, LIST_ITEMS_BORDER_NORMAL, 1);
-            GuiListView((Rectangle){ 165, 25, 140, 124 }, "Charmander;Bulbasaur;#18#Squirtel;Pikachu;Eevee;Pidgey", &listViewScrollIndex, &listViewActive);
-            GuiListViewEx((Rectangle){ 165, 162, 140, 184 }, listViewExList, 8, &listViewExScrollIndex, &listViewExActive, &listViewExFocus);
-            GuiSetStyle(LISTVIEW, LIST_ITEMS_BORDER_NORMAL, 0);
-
-            //GuiToggle((Rectangle){ 165, 400, 140, 25 }, "#1#ONE", &toggleGroupActive);
-            GuiToggleGroup((Rectangle){ 165, 360, 140, 24 }, "#1#ONE\n#3#TWO\n#8#THREE\n#23#", &toggleGroupActive);
-            //GuiDisable();
-            GuiSetStyle(SLIDER, SLIDER_PADDING, 2);
-            GuiToggleSlider((Rectangle){ 165, 480, 140, 30 }, "ON;OFF", &toggleSliderActive);
-            GuiSetStyle(SLIDER, SLIDER_PADDING, 0);
-
-            // Third GUI column
-            GuiPanel((Rectangle){ 320, 25, 225, 140 }, "Panel Info");
-            GuiColorPicker((Rectangle){ 320, 185, 196, 192 }, NULL, &colorPickerValue);
-
-            //GuiDisable();
-            GuiSlider((Rectangle){ 355, 400, 165, 20 }, "TEST", TextFormat("%2.2f", sliderValue), &sliderValue, -50, 100);
-            GuiSliderBar((Rectangle){ 320, 430, 200, 20 }, NULL, TextFormat("%i", (int)sliderBarValue), &sliderBarValue, 0, 100);
-
-            GuiProgressBar((Rectangle){ 320, 460, 200, 20 }, NULL, TextFormat("%i%%", (int)(progressValue*100)), &progressValue, 0.0f, 1.0f);
-            GuiEnable();
-
-            // NOTE: View rectangle could be used to perform some scissor test
-            Rectangle view = { 0 };
-            GuiScrollPanel((Rectangle){ 560, 25, 102, 354 }, NULL, (Rectangle){ 560, 25, 300, 1200 }, &viewScroll, &view);
-
-            Vector2 mouseCell = { 0 };
-            GuiGrid((Rectangle) { 560, 25 + 180 + 195, 100, 120 }, NULL, 20, 3, &mouseCell);
-
-            GuiColorBarAlpha((Rectangle){ 320, 490, 200, 30 }, NULL, &alphaValue);
-
-            GuiSetStyle(DEFAULT, TEXT_ALIGNMENT_VERTICAL, TEXT_ALIGN_TOP);   // WARNING: Word-wrap does not work as expected in case of no-top alignment
-            GuiSetStyle(DEFAULT, TEXT_WRAP_MODE, TEXT_WRAP_WORD);            // WARNING: If wrap mode enabled, text editing is not supported
-            if (GuiTextBox((Rectangle){ 678, 25, 258, 492 }, textBoxMultiText, 1024, textBoxMultiEditMode)) textBoxMultiEditMode = !textBoxMultiEditMode;
-            GuiSetStyle(DEFAULT, TEXT_WRAP_MODE, TEXT_WRAP_NONE);
-            GuiSetStyle(DEFAULT, TEXT_ALIGNMENT_VERTICAL, TEXT_ALIGN_MIDDLE);
-
-            GuiSetStyle(DEFAULT, TEXT_ALIGNMENT, TEXT_ALIGN_LEFT);
-            GuiStatusBar((Rectangle){ 0, (float)GetScreenHeight() - 20, (float)GetScreenWidth(), 20 }, "This is a status bar");
-            GuiSetStyle(DEFAULT, TEXT_ALIGNMENT, TEXT_ALIGN_CENTER);
-            //GuiSetStyle(STATUSBAR, TEXT_INDENTATION, 20);
-
-            if (showMessageBox)
+        // Selection highlight
+        if (selActive)
+        {
+            int sl, sc, el, ec;
+            GetSelectionOrdered(sl, sc, el, ec);
+            for (int i = sl; i <= el; i++)
             {
-                DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(RAYWHITE, 0.8f));
-                int result = GuiMessageBox((Rectangle){ (float)GetScreenWidth()/2 - 125, (float)GetScreenHeight()/2 - 50, 250, 100 }, GuiIconText(ICON_EXIT, "Close Window"), "Do you really want to exit?", "Yes;No");
-
-                if ((result == 0) || (result == 2)) showMessageBox = false;
-                else if (result == 1) exitWindow = true;
+                const std::string& ln = lines[i];
+                int startC = (i == sl) ? sc : 0;
+                int endC   = (i == el) ? ec : (int)ln.size();
+                int x1 = TEXT_ORIGIN_X + MeasureText(ln.substr(0, startC).c_str(), FONT_SIZE);
+                int x2 = TEXT_ORIGIN_X + MeasureText(ln.substr(0, endC).c_str(), FONT_SIZE);
+                if (i < el) x2 = TEXT_ORIGIN_X + MeasureText(ln.c_str(), FONT_SIZE) + 8;
+                DrawRectangle(x1, TEXT_ORIGIN_Y + i * LINE_HEIGHT, x2 - x1, LINE_HEIGHT, (Color){70, 130, 240, 140});
             }
+        }
 
-            if (showTextInputBox)
+        // Toolbar
+        DrawRectangle(0, 0, GetScreenWidth(), 40, LIGHTGRAY);
+        DrawText("Ctrl+S Save | Ctrl+O Open | Ctrl+C Copy | Ctrl+X Cut | Ctrl+V Paste | Ctrl+A All | Shift+Arrows Select",
+                 10, 10, 14, GRAY);
+
+        // Char count
+        const char* ccText = TextFormat("chars: %d", GetTotalCharCount());
+        DrawText(ccText, GetScreenWidth() - MeasureText(ccText, 20) - 10, 10, 20, DARKGRAY);
+
+        // Line numbers gutter
+        DrawRectangle(0, 40, 60, GetScreenHeight(), (Color){230, 230, 230, 255});
+
+        // Lines
+        for (int i = 0; i < (int)lines.size(); i++)
+        {
+            Color numColor = (i == cursorLine) ? (Color){60, 60, 200, 255} : GRAY;
+            DrawText(TextFormat("%d", i + 1), 5, TEXT_ORIGIN_Y + i * LINE_HEIGHT, FONT_SIZE, numColor);
+            DrawText(lines[i].c_str(), TEXT_ORIGIN_X, TEXT_ORIGIN_Y + i * LINE_HEIGHT, FONT_SIZE, (Color){30, 30, 30, 255});
+        }
+
+        // Cursor — always drawn; blinks when no selection, solid when selecting
+        {
+            double t = GetTime();
+            bool cursorVisible = selActive ? true : (fmod(t, 1.0) < 0.65);
+
+            if (cursorVisible)
             {
-                GuiUnlock();
+                std::string before = lines[cursorLine].substr(0, cursorCol);
+                int cx = TEXT_ORIGIN_X + MeasureText(before.c_str(), FONT_SIZE);
+                int cy = TEXT_ORIGIN_Y + cursorLine * LINE_HEIGHT;
 
-                DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Fade(RAYWHITE, 0.8f));
-                int result = GuiTextInputBox((Rectangle){ (float)GetScreenWidth()/2 - 120, (float)GetScreenHeight()/2 - 60, 240, 140 }, GuiIconText(ICON_FILE_SAVE, "Save file as..."), "Introduce output file name:", "Ok;Cancel", textInput, 255, NULL);
-
-                if (result == 1)
-                {
-                    // TODO: Validate textInput value and save
-
-                    TextCopy(textInputFileName, textInput);
-                }
-
-                if ((result == 0) || (result == 1) || (result == 2))
-                {
-                    showTextInputBox = false;
-                    TextCopy(textInput, "\0");
-                }
+                // Wide outer glow
+                DrawRectangle(cx - 3, cy - 1, 10, LINE_HEIGHT + 2, (Color){255, 80, 0, 40});
+                // Mid glow
+                DrawRectangle(cx - 1, cy, 6, LINE_HEIGHT, (Color){255, 120, 20, 90});
+                // Main bar — 4 px vivid orange-red, pops against both white and blue selection
+                DrawRectangle(cx, cy, 4, LINE_HEIGHT, (Color){255, 60, 0, 255});
+                // Bright white centre line for crispness
+                DrawRectangle(cx + 1, cy + 2, 2, LINE_HEIGHT - 4, (Color){255, 255, 255, 180});
             }
-            //----------------------------------------------------------------------------------
+        }
 
         EndDrawing();
-        //----------------------------------------------------------------------------------
     }
 
-    // De-Initialization
-    //--------------------------------------------------------------------------------------
-    CloseWindow();        // Close window and OpenGL context
-    //--------------------------------------------------------------------------------------
-
-    return 0;
+    CloseWindow();
 }
