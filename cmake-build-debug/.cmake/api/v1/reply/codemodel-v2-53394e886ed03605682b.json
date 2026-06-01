@@ -1,0 +1,78 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.30"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "Objektno",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "mat-vek::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-mat-vek-Debug-30d21df557aac3842c5d.json",
+					"name" : "mat-vek",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "op-za-dropki::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-op-za-dropki-Debug-5d87b151b419aab4977c.json",
+					"name" : "op-za-dropki",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "vek-class::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-vek-class-Debug-696a1f969bb9cff8b991.json",
+					"name" : "vek-class",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "C:/Users/petar/CLionProjects/Objektno/cmake-build-debug",
+		"source" : "C:/Users/petar/CLionProjects/Objektno"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 7
+	}
+}

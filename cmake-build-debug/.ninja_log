@@ -1,0 +1,5 @@
+# ninja log v6
+4	488	8020494525832177	CMakeFiles/Objektno.dir/main.cpp.obj	11732ad05e64faa5
+2227	2324	8020496201786490	Objektno.exe	d7e65bb54bee40c3
+5	299	8020512338123187	build.ninja	9ac868d1b87c5fa4
+26	2224	8020496179776873	CMakeFiles/Objektno.dir/matematicki-vektor.cpp.obj	ead847639803762e

@@ -1,0 +1,5 @@
+C:/Users/petar/CLionProjects/Objektno/cmake-build-debug/CMakeFiles/mat-vek.dir
+C:/Users/petar/CLionProjects/Objektno/cmake-build-debug/CMakeFiles/op-za-dropki.dir
+C:/Users/petar/CLionProjects/Objektno/cmake-build-debug/CMakeFiles/vek-class.dir
+C:/Users/petar/CLionProjects/Objektno/cmake-build-debug/CMakeFiles/edit_cache.dir
+C:/Users/petar/CLionProjects/Objektno/cmake-build-debug/CMakeFiles/rebuild_cache.dir
